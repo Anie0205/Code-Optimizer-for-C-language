@@ -30,11 +30,10 @@ def fold_constants(ast):
             self.visit(node.stmt)
 
         def visit_If(self, node):
-            self._enter_condition()
             self.visit(node.cond)
-            self._exit_condition()
             self.visit(node.iftrue)
-            self.visit(node.iffalse)
+            if node.iffalse is not None:
+                self.visit(node.iffalse)
 
         def visit_Decl(self, node):
             if node.init:
@@ -250,32 +249,46 @@ def loop_invariant_code_motion(ast):
             self.counter = 0
             self.loop_vars = set()
 
-        def visit_For(self, node):
+        def visit_Compound(self, node):
+            # Visit all items, and find for-loops inside
+            if not node.block_items:
+                return
+
+            new_block_items = []
+            for stmt in node.block_items:
+                if isinstance(stmt, c_ast.For):
+                    hoisted = self._process_for_loop(stmt)
+                    new_block_items.extend(hoisted)  # Hoisted decls before the loop
+                    new_block_items.append(stmt)     # Then the original loop
+                else:
+                    new_block_items.append(stmt)
+            node.block_items = new_block_items
+
+        def _process_for_loop(self, node):
+            hoisted_decls = []
+
+            # Track loop vars
             if isinstance(node.init, c_ast.DeclList):
                 for decl in node.init.decls:
                     self.loop_vars.add(decl.name)
-            elif isinstance(node.init, c_ast.Assignment):
-                if isinstance(node.init.lvalue, c_ast.ID):
-                    self.loop_vars.add(node.init.lvalue.name)
+            elif isinstance(node.init, c_ast.Assignment) and isinstance(node.init.lvalue, c_ast.ID):
+                self.loop_vars.add(node.init.lvalue.name)
 
-            if isinstance(node.stmt, c_ast.Compound):
-                self._process_loop_body(node.stmt)
+            # Check the loop body
+            if isinstance(node.stmt, c_ast.Compound) and node.stmt.block_items:
+                new_loop_body = []
+                for stmt in node.stmt.block_items:
+                    if isinstance(stmt, c_ast.Decl) and stmt.init:
+                        if not self._depends_on_loop_vars(stmt.init):
+                            temp_name = f"_t{self.counter}"
+                            self.counter += 1
+                            hoisted_decls.append(make_decl(temp_name, stmt.init))
+                            stmt.init = c_ast.ID(name=temp_name)
+                    new_loop_body.append(stmt)
+                node.stmt.block_items = new_loop_body
 
             self.loop_vars.clear()
-
-        def _process_loop_body(self, node):
-            if not node.block_items:
-                return
-            new_items = []
-            for stmt in node.block_items:
-                if isinstance(stmt, c_ast.Decl) and isinstance(stmt.init, c_ast.BinaryOp):
-                    if not self._depends_on_loop_vars(stmt.init):
-                        temp_name = f"_t{self.counter}"
-                        self.counter += 1
-                        new_items.append(make_decl(temp_name, stmt.init))
-                        stmt.init = c_ast.ID(name=temp_name)
-                new_items.append(stmt)
-            node.block_items = new_items
+            return hoisted_decls
 
         def _depends_on_loop_vars(self, expr):
             class Checker(c_ast.NodeVisitor):
@@ -296,8 +309,8 @@ def loop_invariant_code_motion(ast):
 # -----------------------
 
 def optimize_c_ast(ast):
+    #loop_invariant_code_motion(ast)
     fold_constants(ast)
-    eliminate_common_subexpressions(ast)
-    strength_reduction(ast)
-    loop_invariant_code_motion(ast)
-    remove_dead_code(ast)
+    #eliminate_common_subexpressions(ast)
+    #strength_reduction(ast)
+    #remove_dead_code(ast)
